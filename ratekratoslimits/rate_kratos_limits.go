@@ -11,12 +11,12 @@ package ratekratoslimits
 
 import (
 	"context"
+	"log/slog"
 
-	"github.com/go-kratos/kratos/v2/errors"
-	"github.com/go-kratos/kratos/v2/log"
-	"github.com/go-kratos/kratos/v2/middleware"
-	"github.com/go-kratos/kratos/v2/middleware/ratelimit"
-	"github.com/go-kratos/kratos/v2/middleware/selector"
+	"github.com/go-kratos/kratos/v3/errors"
+	"github.com/go-kratos/kratos/v3/middleware"
+	"github.com/go-kratos/kratos/v3/middleware/ratelimit"
+	"github.com/go-kratos/kratos/v3/middleware/selector"
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/yylego/kratos-auth/authkratos"
 	"github.com/yylego/neatjson/neatjsons"
@@ -60,42 +60,37 @@ func (c *Config) WithNewSpanHook(fn authkratos.NewSpanHookFunc) *Config {
 	return c
 }
 
-func NewMiddleware(cfg *Config, logger log.Logger) middleware.Middleware {
-	slog := log.NewHelper(logger)
-	slog.Infof(
-		"rate-kratos-limits: new middleware side=%v operations=%d rate=%v debug-mode=%v",
-		cfg.routeScope.Side,
-		len(cfg.routeScope.OperationSet),
-		cfg.redisLimit.String(),
-		authkratos.BooleanToNum(cfg.debugMode),
+func NewMiddleware(cfg *Config, applog *slog.Logger) middleware.Middleware {
+	applog.Info(
+		"rate-kratos-limits: new middleware",
+		"side", cfg.routeScope.Side,
+		"operations", len(cfg.routeScope.OperationSet),
+		"rate", cfg.redisLimit.String(),
+		"debug-mode", authkratos.BooleanToNum(cfg.debugMode),
 	)
 	if cfg.debugMode {
-		slog.Debugf("rate-kratos-limits: new middleware route-scope: %s", neatjsons.S(cfg.routeScope))
+		applog.Debug("rate-kratos-limits: new middleware route-scope", "route-scope", neatjsons.S(cfg.routeScope))
 	}
-	return selector.Server(middlewareFunc(cfg, logger)).Match(matchFunc(cfg, logger)).Build()
+	return selector.Server(middlewareFunc(cfg, applog)).Match(matchFunc(cfg, applog)).Build()
 }
 
-func matchFunc(cfg *Config, logger log.Logger) selector.MatchFunc {
-	slog := log.NewHelper(logger)
-
+func matchFunc(cfg *Config, applog *slog.Logger) selector.MatchFunc {
 	return func(ctx context.Context, operation string) bool {
 		defer authkratos.RunSpanHooks(ctx, cfg.spanHooks, "rate-kratos-limits-match")()
 
 		match := cfg.routeScope.Match(operation)
 		if cfg.debugMode {
 			if match {
-				slog.Debugf("rate-kratos-limits: operation=%s side=%v match=%d next -> check-rate-limit", operation, cfg.routeScope.Side, authkratos.BooleanToNum(match))
+				applog.Debug("rate-kratos-limits: match next -> check-rate-limit", "operation", operation, "side", cfg.routeScope.Side, "match", authkratos.BooleanToNum(match))
 			} else {
-				slog.Debugf("rate-kratos-limits: operation=%s side=%v match=%d skip -- check-rate-limit", operation, cfg.routeScope.Side, authkratos.BooleanToNum(match))
+				applog.Debug("rate-kratos-limits: match skip -- check-rate-limit", "operation", operation, "side", cfg.routeScope.Side, "match", authkratos.BooleanToNum(match))
 			}
 		}
 		return match
 	}
 }
 
-func middlewareFunc(cfg *Config, logger log.Logger) middleware.Middleware {
-	slog := log.NewHelper(logger)
-
+func middlewareFunc(cfg *Config, applog *slog.Logger) middleware.Middleware {
 	return func(handleFunc middleware.Handler) middleware.Handler {
 		return func(ctx context.Context, req interface{}) (resp interface{}, err error) {
 			defer authkratos.RunSpanHooks(ctx, cfg.spanHooks, "rate-kratos-limits")()
@@ -105,14 +100,14 @@ func middlewareFunc(cfg *Config, logger log.Logger) middleware.Middleware {
 			uniqueKey, ok := cfg.keyFromCtx(ctx)
 			if !ok {
 				if cfg.debugMode {
-					slog.Debugf("rate-kratos-limits: reject requests key=unknown missing unique key from context")
+					applog.Debug("rate-kratos-limits: reject requests, missing unique key from context", "key", "unknown")
 				}
 				return nil, ratelimit.ErrLimitExceed
 			}
 
 			if uniqueKey == "" {
 				if cfg.debugMode {
-					slog.Debugf("rate-kratos-limits: reject requests key=nothing missing unique key from context")
+					applog.Debug("rate-kratos-limits: reject requests, missing unique key from context", "key", "nothing")
 				}
 				return nil, ratelimit.ErrLimitExceed
 			}
@@ -122,7 +117,7 @@ func middlewareFunc(cfg *Config, logger log.Logger) middleware.Middleware {
 			res, err := cfg.redisCache.Allow(ctx, uniqueKey, *cfg.redisLimit)
 			if err != nil {
 				if cfg.debugMode {
-					slog.Debugf("rate-kratos-limits: redis is unavailable key=%s err=%v reject requests", uniqueKey, err)
+					applog.Debug("rate-kratos-limits: redis is unavailable, reject requests", "key", uniqueKey, "reason", err)
 				}
 				return nil, errors.ServiceUnavailable("unavailable", "rate-kratos-limits: redis is unavailable").WithCause(err)
 			}
@@ -130,12 +125,12 @@ func middlewareFunc(cfg *Config, logger log.Logger) middleware.Middleware {
 			// 但在写逻辑时把范围放宽些，避免底层不按预期返回
 			if res.Allowed <= 0 {
 				if cfg.debugMode {
-					slog.Debugf("rate-kratos-limits: reject requests key=%s allowed=%v remaining=%v", uniqueKey, res.Allowed, res.Remaining)
+					applog.Debug("rate-kratos-limits: reject requests", "key", uniqueKey, "allowed", res.Allowed, "remaining", res.Remaining)
 				}
 				return nil, ratelimit.ErrLimitExceed
 			}
 			if cfg.debugMode {
-				slog.Debugf("rate-kratos-limits: accept requests key=%s allowed=%v remaining=%v", uniqueKey, res.Allowed, res.Remaining)
+				applog.Debug("rate-kratos-limits: accept requests", "key", uniqueKey, "allowed", res.Allowed, "remaining", res.Remaining)
 			}
 			return handleFunc(ctx, req)
 		}
