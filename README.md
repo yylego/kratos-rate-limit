@@ -1,9 +1,13 @@
+<!-- TEMPLATE (EN) BEGIN: BADGES -->
+
 [![GitHub Workflow Status (branch)](https://img.shields.io/github/actions/workflow/status/yylego/kratos-rate-limit/release.yml?branch=main&label=BUILD)](https://github.com/yylego/kratos-rate-limit/actions/workflows/release.yml?query=branch%3Amain)
 [![GoDoc](https://pkg.go.dev/badge/github.com/yylego/kratos-rate-limit)](https://pkg.go.dev/github.com/yylego/kratos-rate-limit)
 [![Coverage Status](https://img.shields.io/coveralls/github/yylego/kratos-rate-limit/main.svg)](https://coveralls.io/github/yylego/kratos-rate-limit?branch=main)
-[![Supported Go Versions](https://img.shields.io/badge/Go-1.25+-lightgrey.svg)](https://go.dev/)
+[![Supported Go Versions](https://img.shields.io/badge/Go-1.26%2B-lightgrey.svg)](https://go.dev/)
 [![GitHub Release](https://img.shields.io/github/release/yylego/kratos-rate-limit.svg)](https://github.com/yylego/kratos-rate-limit/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/yylego/kratos-rate-limit)](https://goreportcard.com/report/github.com/yylego/kratos-rate-limit)
+
+<!-- TEMPLATE (EN) CLOSE: BADGES -->
 
 # kratos-rate-limit
 
@@ -17,15 +21,15 @@ Distributed rate limiting middleware backed with Redis persistence.
 
 [中文说明](README.zh.md)
 
-<!-- TEMPLATE (EN) END: LANGUAGE NAVIGATION -->
+<!-- TEMPLATE (EN) CLOSE: LANGUAGE NAVIGATION -->
 
 ## Main Features
 
-🚦 **Distributed Rate Limiting**: Redis-backed rate limiting across instances
-🔑 **Context-Based ID**: Extract unique identification from request context
-📊 **Configurable Limits**: Use `redis_rate.Limit` with fine-grained throttling
-🗺️ **Route Scope**: INCLUDE/EXCLUDE mode to choose which routes get rate-limited
-📡 **APM Tracing**: Span hook integration via `authkratos.SpanHook`
+- 🚦 **Distributed Rate Limiting**: Redis-backed rate limiting across instances
+- 🔑 **Context-Based ID**: Extract unique identification from request context
+- 📊 **Configurable Limits**: Use `redis_rate.Limit` with fine-grained throttling
+- 🗺️ **Route Scope**: INCLUDE/EXCLUDE mode to choose which routes get rate-limited
+- 🪵 **Logs**: Each route match and limit outcome goes to the logger at debug level, a Redis failure at warn level
 
 ## Installation
 
@@ -36,19 +40,45 @@ go get github.com/yylego/kratos-rate-limit
 ## Usage
 
 ```go
-import "github.com/yylego/kratos-rate-limit/ratekratoslimits"
+import (
+    "context"
+    "log/slog"
 
-cfg := ratekratoslimits.NewConfig(
-    routeScope,
-    redisRateLimiter,
-    &redis_rate.Limit{Rate: 10, Burst: 20, Period: time.Minute},
-    func(ctx context.Context) (string, bool) {
-        // extract unique identification from context
-        return getUserID(ctx), true
-    },
-).WithDebugMode(true)
-mw := ratekratoslimits.NewMiddleware(cfg, logger)
+    "github.com/go-kratos/kratos/v3/transport"
+    "github.com/go-kratos/kratos/v3/transport/http"
+    "github.com/go-redis/redis_rate/v10"
+    "github.com/redis/go-redis/v9"
+    "github.com/yylego/kratos-auth/authkratos"
+    "github.com/yylego/kratos-rate-limit/ratekratoslimits"
+)
+
+func newHTTPServer(client *redis.Client, logger *slog.Logger) *http.Server {
+    // Routes that get the limit, written as the operation names that protoc-gen-go-http generates
+    routeScope := authkratos.NewInclude("/api.Article/Search")
+
+    // Count each account on its own: 10 requests each minute
+    limit := redis_rate.PerMinute(10)
+    keyFromCtx := func(ctx context.Context) (string, bool) {
+        tsp, ok := transport.FromServerContext(ctx)
+        if !ok {
+            return "", false
+        }
+        account := tsp.RequestHeader().Get("X-User")
+        if account == "" {
+            return "", false // a request with no key is rejected
+        }
+        // The prefix keeps this limit apart from other limits that count the same accounts in the same Redis
+        return "article-search:" + account, true
+    }
+
+    cfg := ratekratoslimits.NewConfig(routeScope, redis_rate.NewLimiter(client), limit, keyFromCtx)
+    return http.NewServer(http.Middleware(ratekratoslimits.NewMiddleware(cfg, logger)))
+}
 ```
+
+Requests to routes in the scope get `429 RATELIMIT` when past the limit, with a `Retry-After` reply header that gives the seconds to wait; a request with no key gets `429` too, and a Redis failure gets `503`. Routes outside the scope have no limit.
+
+The count goes by the key alone: routes in one scope share one quota, and two limits that return the same key share one count in Redis. Give each limit its own key prefix in `keyFromCtx`, as the example does with `article-search:`.
 
 ---
 
@@ -110,10 +140,4 @@ Welcome to contribute to this project via submitting merge requests and reportin
 
 **Have Fun Coding with this package!** 🎉🎉🎉
 
-<!-- TEMPLATE (EN) END: STANDARD PROJECT FOOTER -->
-
----
-
-## GitHub Stars
-
-[![Stargazers](https://starchart.cc/yylego/kratos-rate-limit.svg?variant=adaptive)](https://starchart.cc/yylego/kratos-rate-limit)
+<!-- TEMPLATE (EN) CLOSE: STANDARD PROJECT FOOTER -->
