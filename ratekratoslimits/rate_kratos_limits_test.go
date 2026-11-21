@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-kratos/kratos/v3/errors"
 	"github.com/go-kratos/kratos/v3/transport"
 	"github.com/go-kratos/kratos/v3/transport/http"
 	"github.com/go-redis/redis_rate/v10"
@@ -93,6 +94,48 @@ const limitExceedBody = `{"code":429,"reason":"RATELIMIT","message":"service una
 func TestNewConfig(t *testing.T) {
 	cfg, _ := newTestConfig(t)
 	require.Equal(t, redis_rate.PerMinute(2), cfg.limit)
+}
+
+func TestConfig_WithExceedErk(t *testing.T) {
+	cfg, _ := newTestConfig(t)
+	cfg.WithExceedErk(func(ctx context.Context) *errors.Error {
+		return errors.New(429, "TOO_MANY_REQUESTS", "slow down")
+	})
+	server := newTestServer(t, cfg)
+
+	for range 2 {
+		code, _, _ := sendRequest(t, server.URL+"/search", "alice")
+		require.Equal(t, 200, code)
+	}
+	code, body, waitSeconds := sendRequest(t, server.URL+"/search", "alice")
+	require.Equal(t, 429, code)
+	require.Equal(t, `{"code":429,"reason":"TOO_MANY_REQUESTS","message":"slow down"}`, body)
+	require.Equal(t, "30", waitSeconds)
+
+	// A request with no key gets the same response, without Retry-After
+	// 读不到键的请求也拿到同一个错误，不带 Retry-After
+	code, body, waitSeconds = sendRequest(t, server.URL+"/search", "")
+	require.Equal(t, 429, code)
+	require.Equal(t, `{"code":429,"reason":"TOO_MANY_REQUESTS","message":"slow down"}`, body)
+	require.Equal(t, "", waitSeconds)
+}
+
+func TestConfig_WithOutageErk(t *testing.T) {
+	cfg, redisServer := newTestConfig(t)
+	// The function runs on the goroutine of the request, so the cause goes back to the test in a chan
+	// 函数跑在处理请求的协程里，所以 cause 经 chan 交回测试
+	causes := make(chan error, 1)
+	cfg.WithOutageErk(func(ctx context.Context, cause error) *errors.Error {
+		causes <- cause
+		return errors.ServiceUnavailable("RATE_LIMIT_OFFLINE", "rate limit redis is offline").WithCause(cause)
+	})
+	server := newTestServer(t, cfg)
+	redisServer.Close()
+
+	code, body, _ := sendRequest(t, server.URL+"/search", "alice")
+	require.Equal(t, 503, code)
+	require.Equal(t, `{"code":503,"reason":"RATE_LIMIT_OFFLINE","message":"rate limit redis is offline"}`, body)
+	require.Error(t, <-causes)
 }
 
 func TestNewMiddleware(t *testing.T) {

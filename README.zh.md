@@ -78,6 +78,17 @@ func newHTTPServer(client *redis.Client, logger *slog.Logger) *http.Server {
 
 范围内的路由：超限时返回 `429 RATELIMIT`，响应头 `Retry-After` 写着还要等几秒；读不到键时也返回 `429`，Redis 出错时返回 `503`。范围外的路由不限流。
 
+想返回自己的错误码，用 `WithExceedErk`（超限）和 `WithOutageErk`（Redis 出错，`cause` 是 Redis 的错误）各传一个函数；想记日志就写在这个函数里：
+
+```go
+cfg.WithExceedErk(func(ctx context.Context) *errors.Error {
+    return errors.New(429, "TOO_MANY_REQUESTS", "slow down")
+}).WithOutageErk(func(ctx context.Context, cause error) *errors.Error {
+    logger.ErrorContext(ctx, "rate limit redis is down", "cause", cause)
+    return errors.ServiceUnavailable("RATE_LIMIT_OFFLINE", "rate limit redis is offline").WithCause(cause)
+})
+```
+
 计数只看键：同一个范围里的几个路由共用一份额度；两个限流返回同一个键，也会在 Redis 里共用一份计数。所以每个限流要在 `keyFromCtx` 里给键加自己的前缀，像示例里的 `article-search:`。
 
 ---

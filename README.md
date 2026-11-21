@@ -78,6 +78,17 @@ func newHTTPServer(client *redis.Client, logger *slog.Logger) *http.Server {
 
 Requests to routes in the scope get `429 RATELIMIT` when past the limit, with a `Retry-After` reply header that gives the seconds to wait; a request with no key gets `429` too, and a Redis failure gets `503`. Routes outside the scope have no limit.
 
+To respond with a custom reason, pass a function to `WithExceedErk` (past the limit) and to `WithOutageErk` (Redis failure, `cause` is the Redis error); write a log inside this function when one is wanted:
+
+```go
+cfg.WithExceedErk(func(ctx context.Context) *errors.Error {
+    return errors.New(429, "TOO_MANY_REQUESTS", "slow down")
+}).WithOutageErk(func(ctx context.Context, cause error) *errors.Error {
+    logger.ErrorContext(ctx, "rate limit redis is down", "cause", cause)
+    return errors.ServiceUnavailable("RATE_LIMIT_OFFLINE", "rate limit redis is offline").WithCause(cause)
+})
+```
+
 The count goes by the key alone: routes in one scope share one quota, and two limits that return the same key share one count in Redis. Give each limit its own key prefix in `keyFromCtx`, as the example does with `article-search:`.
 
 ---
